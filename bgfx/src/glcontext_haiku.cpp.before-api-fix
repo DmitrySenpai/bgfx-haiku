@@ -1,0 +1,186 @@
+#include "bgfx_p.h"
+
+#if (BGFX_CONFIG_RENDERER_OPENGLES || BGFX_CONFIG_RENDERER_OPENGL) \
+    && BX_PLATFORM_HAIKU
+
+#include "renderer_gl.h"
+
+#include <GLView.h>
+
+namespace bgfx { namespace gl
+{
+
+#define GL_IMPORT(_optional, _proto, _func, _import) _proto _func
+#include "glimports.h"
+#undef GL_IMPORT
+
+
+void GlContext::create(const Resolution& _resolution)
+{
+    BX_TRACE("Creating Haiku OpenGL context wrapper.");
+
+    /*
+     * SDL3 Haiku returns BGLView* as SDL_GLContext.
+     * BattleSpades/our test supplies that through
+     * bgfx::PlatformData::context.
+     */
+    m_view = static_cast<BGLView*>(g_platformData.context);
+
+    BGFX_FATAL(
+        NULL != m_view,
+        Fatal::UnableToInitialize,
+        "Haiku bgfx backend requires caller-provided BGLView context."
+    );
+
+    /*
+     * OpenGL Kit requires GL calls while the BGLView is locked.
+     */
+    m_view->LockGL();
+    m_locked = true;
+
+    m_vsync = 0 != (_resolution.reset & BGFX_RESET_VSYNC);
+
+    import();
+
+    g_internalData.context = m_view;
+
+    BX_TRACE("Haiku OpenGL context ready: %p", m_view);
+}
+
+
+void GlContext::destroy()
+{
+    BX_TRACE("Destroying Haiku OpenGL context wrapper.");
+
+    if (NULL != m_view)
+    {
+        if (m_locked)
+        {
+            m_view->UnlockGL();
+            m_locked = false;
+        }
+
+        /*
+         * The context belongs to SDL/the application.
+         * Do NOT delete BGLView here.
+         */
+        m_view = NULL;
+    }
+
+    g_internalData.context = NULL;
+}
+
+
+void GlContext::resize(const Resolution& _resolution)
+{
+    m_vsync = 0 != (_resolution.reset & BGFX_RESET_VSYNC);
+}
+
+
+uint64_t GlContext::getCaps() const
+{
+    /*
+     * Secondary native-window swap chains are not implemented
+     * for the Haiku port yet.
+     */
+    return 0;
+}
+
+
+SwapChainGL* GlContext::createSwapChain(
+    void* _nwh,
+    int32_t _width,
+    int32_t _height)
+{
+    BX_UNUSED(_nwh, _width, _height);
+
+    BX_WARN(
+        false,
+        "Secondary OpenGL swap chains are not supported on Haiku."
+    );
+
+    return NULL;
+}
+
+
+void GlContext::destroySwapChain(SwapChainGL* _swapChain)
+{
+    BX_UNUSED(_swapChain);
+}
+
+
+void GlContext::makeCurrent(SwapChainGL* _swapChain)
+{
+    BX_UNUSED(_swapChain);
+
+    if (NULL != m_view && !m_locked)
+    {
+        m_view->LockGL();
+        m_locked = true;
+    }
+}
+
+
+void GlContext::swap(SwapChainGL* _swapChain)
+{
+    BX_UNUSED(_swapChain);
+
+    if (NULL == m_view)
+    {
+        return;
+    }
+
+    makeCurrent(NULL);
+
+    /*
+     * BGLView has its own swap implementation.
+     */
+    m_view->SwapBuffers(m_vsync);
+
+    /*
+     * Releasing and reacquiring after presentation helps Haiku
+     * process window changes/resizes and keeps GL ownership on
+     * the render thread.
+     */
+    if (m_locked)
+    {
+        m_view->UnlockGL();
+        m_locked = false;
+    }
+
+    m_view->LockGL();
+    m_locked = true;
+}
+
+
+void GlContext::import()
+{
+    BX_TRACE("Importing Haiku OpenGL functions:");
+
+#define GL_EXTENSION(_optional, _proto, _func, _import)          \
+    {                                                            \
+        if (NULL == _func)                                       \
+        {                                                        \
+            _func = reinterpret_cast<_proto>(                    \
+                m_view->GetGLProcAddress(#_import)               \
+            );                                                   \
+                                                                 \
+            BX_TRACE("  %p " #_func " (" #_import ")", _func);  \
+                                                                 \
+            BGFX_FATAL(                                          \
+                BX_IGNORE_C4127(_optional) || NULL != _func,     \
+                Fatal::UnableToInitialize,                       \
+                "Haiku: failed to import OpenGL function %s",    \
+                #_import                                         \
+            );                                                   \
+        }                                                        \
+    }
+
+#include "glimports.h"
+
+#undef GL_EXTENSION
+}
+
+} } // namespace bgfx::gl
+
+#endif
